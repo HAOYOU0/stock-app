@@ -3,14 +3,11 @@ import yfinance as yf
 import pandas as pd
 import twstock
 from concurrent.futures import ThreadPoolExecutor
-import logging
+import datetime
 
-# 網頁基本設定
+# 網頁介面設定
 st.set_page_config(page_title="台股首日噴發篩選器", layout="wide")
-st.title("🔥 橫盤結束：首日噴發上軌篩選器 (同步版)")
-
-# 隱藏 yfinance 訊息
-logging.getLogger('yfinance').setLevel(logging.CRITICAL)
+st.title("🔥 橫盤結束：首日噴發上軌篩選器 (強制對齊版)")
 
 def scan_logic(stock_id):
     try:
@@ -18,14 +15,16 @@ def scan_logic(stock_id):
         suffix = ".TW" if info.market == '上市' else ".TWO"
         symbol = f"{stock_id}{suffix}"
         
-        # 下載資料 (與 Jupyter 一致)
-        df = yf.download(symbol, period="6mo", interval="1d", progress=False, threads=False)
+        # 抓取較長區間，確保 MA20/STD 計算精準
+        df = yf.download(symbol, period="1y", interval="1d", progress=False)
         if isinstance(df.columns, pd.MultiIndex):
             df.columns = df.columns.get_level_values(0)
         
-        if df.empty or len(df) < 21: return None
+        # 關鍵：確保抓到的是最新的資料，並刪除可能存在的空白行
+        df = df.dropna()
+        if len(df) < 25: return None
 
-        # 技術指標 (嚴格對齊 Jupyter)
+        # 技術指標計算
         close = df['Close']
         vol = df['Volume']
         ma20 = close.rolling(20).mean()
@@ -33,35 +32,35 @@ def scan_logic(stock_id):
         upper = ma20 + (std * 2)
         vol_ma20 = vol.rolling(20).mean()
 
-        # 取得數值
-        c0, c1, c2, c3, c4 = close.iloc[-1], close.iloc[-2], close.iloc[-3], close.iloc[-4], close.iloc[-5]
-        u0, u1, u2, u3, u4 = upper.iloc[-1], upper.iloc[-2], upper.iloc[-3], upper.iloc[-4], upper.iloc[-5]
-        v0, v_avg = vol.iloc[-1], vol_ma20.iloc[-1]
+        # 取得最後 5 筆資料 (保證對齊最後一個交易日)
+        curr_close = close.values[-5:] # [前4, 前3, 前2, 昨日, 今日]
+        curr_upper = upper.values[-5:]
+        curr_vol = vol.values[-1]
+        avg_vol = vol_ma20.values[-1]
 
-        # 核心判斷邏輯 (移除 0.5% 與 500張門檻，只要滿足邏輯就顯示)
-        # 1. 過去 4 天都在上軌之下
-        was_squeezing = all(close.iloc[i] < upper.iloc[i] for i in range(-5, -1))
-        # 2. 今天收盤 > 上軌 (不加 0.5%)
-        is_breakout = c0 > u0
-        # 3. 今日量 > 均量 (不加 1.3 倍)
-        is_vol_ok = v0 > v_avg
+        # 核心判斷邏輯
+        # 1. 過去 4 天 (昨日到大前日) 都在上軌之下
+        was_squeezing = all(curr_close[i] < curr_upper[i] for i in range(0, 4))
+        # 2. 今天收盤 > 上軌
+        is_breakout = curr_close[4] > curr_upper[4]
+        # 3. 今日量 > 均量
+        is_vol_ok = curr_vol > avg_vol
 
         if was_squeezing and is_breakout and is_vol_ok:
             return {
                 "產業": info.group,
                 "代碼": stock_id,
                 "名稱": info.name,
-                "收盤": round(float(c0), 2),
-                "上軌": round(float(u0), 2),
-                "漲幅": f"{round(((c0/c1)-1)*100, 2)}%",
-                "量能倍數": round(float(v0/v_avg), 2),
-                "狀態": "🔥 橫盤首日突破上軌"
+                "今日價格": round(float(curr_close[4]), 2),
+                "今日上軌": round(float(curr_upper[4]), 2),
+                "漲幅": f"{round(((curr_close[4]/curr_close[3])-1)*100, 2)}%",
+                "量能倍數": round(float(curr_vol/avg_vol), 2),
+                "更新日期": df.index[-1].strftime('%Y-%m-%d')
             }
     except:
         return None
 
-# 按鈕觸發
-if st.button("🚀 開始全市場同步掃描"):
+if st.button("🚀 開始同步掃描 (強制對齊最後交易日)"):
     all_stocks = [code for code, info in twstock.codes.items() 
                   if info.type == '股票' and info.market in ['上市', '上櫃']]
     
@@ -75,7 +74,7 @@ if st.button("🚀 開始全市場同步掃描"):
 
     if results:
         df_final = pd.DataFrame(results).sort_values(by="量能倍數", ascending=False)
-        # 重新排序列，確保與你 Jupyter 的視覺一致
-        st.dataframe(df_final[["產業", "代碼", "名稱", "收盤", "上軌", "漲幅", "量能倍數", "狀態"]], use_container_width=True)
+        st.write(f"📅 資料最後日期：{results[0]['更新日期']}")
+        st.dataframe(df_final, use_container_width=True)
     else:
         st.info("今日無符合條件標的。")
